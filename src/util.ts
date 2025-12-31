@@ -176,8 +176,10 @@ export async function listConnectionsWithAliases(): Promise<string> {
         const connections = JSON.parse(connectionsResult);
         const enriched = connections.map((conn: any) => {
             const alias = aliases.find(a => a.connectionId === conn.name);
+            // Remove 'active' field - doesn't make sense when connectionName is always required
+            const { active, ...rest } = conn;
             return {
-                ...conn,
+                ...rest,
                 alias: alias?.alias || null,
                 appId: alias?.appId || null
             };
