@@ -134,5 +134,21 @@ server.registerTool(
     })
 );
 
+server.registerTool(
+    'm365_login',
+    {
+        title: 'Login to Microsoft 365',
+        description: 'Authenticates to M365 using device code flow (SSH-friendly). Clears token cache first to avoid invalid_grant errors. Auto-creates an alias after successful login. Returns a device code to enter at microsoft.com/devicelogin.',
+        inputSchema: {
+            alias: z.string().describe('Friendly name for this connection (e.g., "ForIT", "ClientX")'),
+            tenant: z.string().describe('Tenant ID or domain (e.g., "c0efa09e-4bda-4a9d-a177-4c77076b7f76" or "forit.io")'),
+            appId: z.string().optional().describe('Optional: Custom app registration ID. Defaults to PnP multi-tenant app.')
+        }
+    },
+    async ({ alias, tenant, appId }) => ({
+        content: [{ type: 'text', text: await util.loginWithDeviceCode(alias, tenant, appId) }]
+    })
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

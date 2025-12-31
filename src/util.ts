@@ -188,6 +188,106 @@ export async function listConnectionsWithAliases(): Promise<string> {
     }
 }
 
+// Login with device code flow - clears cache first to avoid invalid_grant
+export async function loginWithDeviceCode(alias: string, tenant: string, appId?: string): Promise<string> {
+    // Clear MSAL cache first to avoid invalid_grant errors
+    const cacheDir = path.join(os.homedir(), '.cli-m365-msal_token_cache.json');
+    try {
+        await fs.unlink(cacheDir);
+    } catch {
+        // Cache might not exist, that's fine
+    }
+
+    // Build login command
+    const useAppId = appId || '31359c7f-bd7e-475c-86db-fdb8c937548e'; // PnP default multi-tenant app
+    let loginCmd = `m365 login --authType deviceCode`;
+    if (tenant) {
+        loginCmd += ` --tenant ${tenant}`;
+    }
+
+    return new Promise((resolve) => {
+        const subprocess = spawn(loginCmd, {
+            shell: true,
+            timeout: 300000, // 5 minutes for login
+        });
+
+        let output = '';
+        let deviceCode = '';
+
+        subprocess.stdout.on('data', (data) => {
+            const chunk = data.toString();
+            output += chunk;
+            // Extract device code from output
+            const codeMatch = chunk.match(/enter the code ([A-Z0-9]+) to authenticate/i);
+            if (codeMatch) {
+                deviceCode = codeMatch[1];
+            }
+        });
+
+        subprocess.stderr.on('data', (data) => {
+            const chunk = data.toString();
+            output += chunk;
+            const codeMatch = chunk.match(/enter the code ([A-Z0-9]+) to authenticate/i);
+            if (codeMatch) {
+                deviceCode = codeMatch[1];
+            }
+        });
+
+        subprocess.on('close', async (code) => {
+            if (code === 0) {
+                // Get the new connection info
+                try {
+                    const status = await runCliCommandRaw('m365 status');
+                    const statusJson = JSON.parse(status);
+
+                    // Auto-create alias
+                    await setConnectionAlias(alias, statusJson.connectionName, tenant, statusJson.appId);
+
+                    resolve(JSON.stringify({
+                        success: true,
+                        alias,
+                        connectionId: statusJson.connectionName,
+                        connectedAs: statusJson.connectedAs,
+                        appId: statusJson.appId,
+                        tenant
+                    }, null, 2));
+                } catch (e) {
+                    resolve(JSON.stringify({
+                        success: true,
+                        message: 'Login succeeded but failed to get status',
+                        deviceCode,
+                        output
+                    }, null, 2));
+                }
+            } else {
+                // Return device code if we have it, so user can still authenticate
+                if (deviceCode) {
+                    resolve(JSON.stringify({
+                        success: false,
+                        waitingForAuth: true,
+                        deviceCode,
+                        url: 'https://microsoft.com/devicelogin',
+                        message: `Go to https://microsoft.com/devicelogin and enter code: ${deviceCode}`
+                    }, null, 2));
+                } else {
+                    resolve(JSON.stringify({
+                        success: false,
+                        error: output || 'Login failed',
+                        hint: 'Try clearing ~/.cli-m365-msal_token_cache.json and retry'
+                    }, null, 2));
+                }
+            }
+        });
+
+        subprocess.on('error', (err) => {
+            resolve(JSON.stringify({
+                success: false,
+                error: err.message
+            }, null, 2));
+        });
+    });
+}
+
 // Raw command execution without alias resolution (for internal use)
 async function runCliCommandRaw(command: string): Promise<string> {
     let fullCommand = command;
