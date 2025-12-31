@@ -201,7 +201,7 @@ export async function loginWithDeviceCode(alias: string, tenant: string, appId?:
     return new Promise((resolve) => {
         const subprocess = spawn(loginCmd, {
             shell: true,
-            timeout: 300000,
+            stdio: ['ignore', 'pipe', 'pipe'],
         });
 
         let resolved = false;
