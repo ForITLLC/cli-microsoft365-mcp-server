@@ -202,6 +202,7 @@ export async function loginWithDeviceCode(alias: string, tenant: string, appId?:
         const subprocess = spawn(loginCmd, {
             shell: true,
             stdio: ['ignore', 'pipe', 'pipe'],
+            detached: true,
         });
 
         let resolved = false;
@@ -212,6 +213,10 @@ export async function loginWithDeviceCode(alias: string, tenant: string, appId?:
             if (codeMatch && !resolved) {
                 resolved = true;
                 const deviceCode = codeMatch[1];
+                // Detach subprocess and close streams so it doesn't block MCP response
+                subprocess.stdout?.destroy();
+                subprocess.stderr?.destroy();
+                subprocess.unref();
                 // Return IMMEDIATELY with super clear formatting
                 resolve(`
 ████████████████████████████████████████████████████████████
