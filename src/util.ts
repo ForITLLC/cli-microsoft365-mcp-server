@@ -2,15 +2,32 @@ import { exec, spawn } from 'child_process';
 import path from 'path';
 import { promises as fs } from 'fs';
 
+// BLOCKED/HIDDEN COMMANDS - prevent accidental logout
+const BLOCKED_COMMANDS = ['logout', 'connection remove'];
+const HIDDEN_COMMANDS = ['logout', 'connection remove'];
 
-export async function runCliCommand(command: string): Promise<string> {
-    if (!command.includes('--output')) {
-        const commandPart = command.split('--')[0].trim();
-        command += commandPart.endsWith(' list') ? ' --output csv' : ' --output json';
+export async function runCliCommand(command: string, connectionName?: string): Promise<string> {
+    // Check for blocked commands
+    const lowerCommand = command.toLowerCase();
+    for (const blocked of BLOCKED_COMMANDS) {
+        if (lowerCommand.includes(blocked)) {
+            return `ERROR: '${blocked}' command is disabled to prevent accidental logout. Use the CLI directly if you really need this.`;
+        }
     }
-    
+
+    // If connectionName specified, prepend connection switch
+    let fullCommand = command;
+    if (connectionName) {
+        fullCommand = `m365 connection use --name "${connectionName}" && ${command}`;
+    }
+
+    if (!fullCommand.includes('--output')) {
+        const commandPart = fullCommand.split('--')[0].trim();
+        fullCommand += commandPart.endsWith(' list') ? ' --output csv' : ' --output json';
+    }
+
     return new Promise((resolve, reject) => {
-        const subprocess = spawn(command, {
+        const subprocess = spawn(fullCommand, {
             shell: true,
             timeout: 120000,
         });
@@ -74,6 +91,7 @@ export async function getAllCommands(): Promise<any[]> {
         const fileContent = await fs.readFile(filePath, 'utf-8');
         const cliCommands = JSON.parse(fileContent);
         commands = cliCommands
+            .filter((command: any) => !HIDDEN_COMMANDS.some(hidden => command.name.toLowerCase().includes(hidden)))
             .map((command: any) => ({
                 name: `m365 ${command.name}`,
                 description: command.description,

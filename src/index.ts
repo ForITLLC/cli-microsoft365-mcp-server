@@ -53,14 +53,27 @@ server.registerTool(
     'm365_run_command',
     {
         title: 'Execute CLI for Microsoft 365 command',
-        description: 'Runs a specified CLI for Microsoft 365 command to be used by the Model Context Protocol to execute the command and return the result and reason over the response',
+        description: 'Runs a specified CLI for Microsoft 365 command to be used by the Model Context Protocol to execute the command and return the result and reason over the response. Can target specific tenant connection without manual switching.',
         inputSchema:
         {
-            command: z.string().describe('command name which should be executed')
+            command: z.string().describe('command name which should be executed'),
+            connectionName: z.string().optional().describe('Target a specific connection by name (from m365_list_connections) without switching. Omit to use active connection.')
         }
     },
-    async ({ command }) => ({
-        content: [{ type: 'text', text: await util.runCliCommand(command) }]
+    async ({ command, connectionName }) => ({
+        content: [{ type: 'text', text: await util.runCliCommand(command, connectionName) }]
+    })
+);
+
+server.registerTool(
+    'm365_list_connections',
+    {
+        title: 'List CLI for Microsoft 365 connections',
+        description: 'Lists all available tenant connections. Use connection names with m365_run_command connectionName parameter to target specific tenants without switching.',
+        inputSchema: {}
+    },
+    async ({}) => ({
+        content: [{ type: 'text', text: await util.runCliCommand('m365 connection list') }]
     })
 );
 
