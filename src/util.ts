@@ -188,19 +188,10 @@ export async function listConnectionsWithAliases(): Promise<string> {
     }
 }
 
-// Login with device code flow - clears cache first to avoid invalid_grant
+// Login with device code flow - returns device code IMMEDIATELY for user visibility
 export async function loginWithDeviceCode(alias: string, tenant: string, appId?: string): Promise<string> {
-    // Clear MSAL cache first to avoid invalid_grant errors
-    const cacheDir = path.join(os.homedir(), '.cli-m365-msal_token_cache.json');
-    try {
-        await fs.unlink(cacheDir);
-    } catch {
-        // Cache might not exist, that's fine
-    }
-
-    // Build login command
-    const useAppId = appId || '31359c7f-bd7e-475c-86db-fdb8c937548e'; // PnP default multi-tenant app
-    let loginCmd = `m365 login --authType deviceCode`;
+    const useAppId = appId || '31359c7f-bd7e-475c-86db-fdb8c937548e';
+    let loginCmd = `m365 login --authType deviceCode --appId ${useAppId}`;
     if (tenant) {
         loginCmd += ` --tenant ${tenant}`;
     }
@@ -208,74 +199,49 @@ export async function loginWithDeviceCode(alias: string, tenant: string, appId?:
     return new Promise((resolve) => {
         const subprocess = spawn(loginCmd, {
             shell: true,
-            timeout: 300000, // 5 minutes for login
+            timeout: 300000,
         });
 
-        let output = '';
-        let deviceCode = '';
+        let resolved = false;
 
-        subprocess.stdout.on('data', (data) => {
+        const handleOutput = (data: Buffer) => {
             const chunk = data.toString();
-            output += chunk;
-            // Extract device code from output
             const codeMatch = chunk.match(/enter the code ([A-Z0-9]+) to authenticate/i);
-            if (codeMatch) {
-                deviceCode = codeMatch[1];
-            }
-        });
+            if (codeMatch && !resolved) {
+                resolved = true;
+                const deviceCode = codeMatch[1];
+                // Return IMMEDIATELY with super clear formatting
+                resolve(`
+████████████████████████████████████████████████████████████
+██                                                        ██
+██   DEVICE CODE: ${deviceCode.padEnd(12)}                       ██
+██                                                        ██
+██   Go to: https://microsoft.com/devicelogin            ██
+██                                                        ██
+████████████████████████████████████████████████████████████
 
-        subprocess.stderr.on('data', (data) => {
-            const chunk = data.toString();
-            output += chunk;
-            const codeMatch = chunk.match(/enter the code ([A-Z0-9]+) to authenticate/i);
-            if (codeMatch) {
-                deviceCode = codeMatch[1];
+Enter the code above, then come back here.
+Alias "${alias}" will be created after successful login.
+`);
             }
-        });
+        };
+
+        subprocess.stdout.on('data', handleOutput);
+        subprocess.stderr.on('data', handleOutput);
 
         subprocess.on('close', async (code) => {
+            if (resolved) return; // Already returned device code
             if (code === 0) {
-                // Get the new connection info
                 try {
                     const status = await runCliCommandRaw('m365 status');
                     const statusJson = JSON.parse(status);
-
-                    // Auto-create alias
                     await setConnectionAlias(alias, statusJson.connectionName, tenant, statusJson.appId);
-
-                    resolve(JSON.stringify({
-                        success: true,
-                        alias,
-                        connectionId: statusJson.connectionName,
-                        connectedAs: statusJson.connectedAs,
-                        appId: statusJson.appId,
-                        tenant
-                    }, null, 2));
-                } catch (e) {
-                    resolve(JSON.stringify({
-                        success: true,
-                        message: 'Login succeeded but failed to get status',
-                        deviceCode,
-                        output
-                    }, null, 2));
+                    resolve(`Login successful! Alias "${alias}" created for ${statusJson.connectedAs}`);
+                } catch {
+                    resolve('Login succeeded but failed to create alias');
                 }
             } else {
-                // Return device code if we have it, so user can still authenticate
-                if (deviceCode) {
-                    resolve(JSON.stringify({
-                        success: false,
-                        waitingForAuth: true,
-                        deviceCode,
-                        url: 'https://microsoft.com/devicelogin',
-                        message: `Go to https://microsoft.com/devicelogin and enter code: ${deviceCode}`
-                    }, null, 2));
-                } else {
-                    resolve(JSON.stringify({
-                        success: false,
-                        error: output || 'Login failed',
-                        hint: 'Try clearing ~/.cli-m365-msal_token_cache.json and retry'
-                    }, null, 2));
-                }
+                resolve('Login failed - no device code received');
             }
         });
 
@@ -332,6 +298,24 @@ export async function runCliCommand(command: string, connectionName?: string): P
     for (const blocked of BLOCKED_COMMANDS) {
         if (lowerCommand.includes(blocked)) {
             return `ERROR: '${blocked}' command is disabled to prevent accidental logout. Use the CLI directly if you really need this.`;
+        }
+    }
+
+    // REQUIRE connectionName when multiple connections exist
+    if (!connectionName) {
+        try {
+            const connectionsRaw = await runCliCommandRaw('m365 connection list');
+            const connections = JSON.parse(connectionsRaw);
+            if (connections.length > 1) {
+                const aliases = await loadAliases();
+                const available = connections.map((c: any) => {
+                    const alias = aliases.find(a => a.connectionId === c.name);
+                    return alias ? `"${alias.alias}"` : c.name;
+                }).join(', ');
+                return `ERROR: Multiple connections exist. You MUST specify connectionName. Available: ${available}`;
+            }
+        } catch {
+            // If we can't check, continue - command will fail naturally if needed
         }
     }
 
