@@ -50,6 +50,38 @@ This will ensure that the MCP server will get as much information as possible fr
 
 The MCP server will not do any authentication for you. You will need to first authenticate using CLI for Microsoft 365 using [m365 login](https://pnp.github.io/cli-microsoft365/cmd/login) command. Once you are authenticated, the MCP server will use the same authentication context when running any tool.
 
+### Authentication (Device Code Recommended)
+
+**Device code authentication is the most reliable method**, especially for:
+- SSH sessions where browser auth isn't available
+- Headless servers
+- Remote development environments
+- AI agent automation
+
+```bash
+# Login with device code (recommended)
+m365 login --authType deviceCode
+
+# For specific tenant
+m365 login --authType deviceCode --tenant yourtenant.onmicrosoft.com
+
+# With custom app registration
+m365 login --authType deviceCode --tenant yourtenant.onmicrosoft.com --appId YOUR_APP_ID
+```
+
+The MCP includes an `m365_login` tool that displays device codes prominently for visibility.
+
+### Multi-Tenant Support
+
+When multiple M365 connections exist, you **must** specify which connection to use:
+
+```
+m365_run_command(command: "m365 status", connectionName: "ForIT")
+m365_run_command(command: "m365 status", connectionName: "Personal")
+```
+
+Use `m365_list_connections` to see available connections and their aliases.
+
 Lastly, install the MCP server on your preferred MCP client, referring to the instructions of the picked MCP host. Below, you may find guidance for VS Code.
 
 ### Add to VS Code
