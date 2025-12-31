@@ -69,11 +69,68 @@ server.registerTool(
     'm365_list_connections',
     {
         title: 'List CLI for Microsoft 365 connections',
-        description: 'Lists all available tenant connections. Use connection names with m365_run_command connectionName parameter to target specific tenants without switching.',
+        description: 'Lists all available tenant connections with their aliases. Use alias or connection name with m365_run_command connectionName parameter to target specific tenants.',
         inputSchema: {}
     },
     async ({}) => ({
-        content: [{ type: 'text', text: await util.runCliCommand('m365 connection list') }]
+        content: [{ type: 'text', text: await util.listConnectionsWithAliases() }]
+    })
+);
+
+server.registerTool(
+    'm365_set_connection_alias',
+    {
+        title: 'Set friendly alias for a connection',
+        description: 'Creates a friendly name alias for a tenant connection. Use aliases instead of connection IDs for easier multi-tenant targeting.',
+        inputSchema: {
+            alias: z.string().describe('Friendly name for the connection (e.g., "ForIT", "ClientX")'),
+            connectionId: z.string().describe('The connection ID/name from m365_list_connections'),
+            tenant: z.string().describe('Tenant name or domain (e.g., "foritllc.onmicrosoft.com")'),
+            appId: z.string().optional().describe('Optional: Azure AD app registration ID used for this connection')
+        }
+    },
+    async ({ alias, connectionId, tenant, appId }) => ({
+        content: [{ type: 'text', text: await util.setConnectionAlias(alias, connectionId, tenant, appId) }]
+    })
+);
+
+server.registerTool(
+    'm365_remove_connection_alias',
+    {
+        title: 'Remove a connection alias',
+        description: 'Removes a friendly name alias for a tenant connection.',
+        inputSchema: {
+            alias: z.string().describe('The alias to remove')
+        }
+    },
+    async ({ alias }) => ({
+        content: [{ type: 'text', text: await util.removeConnectionAlias(alias) }]
+    })
+);
+
+server.registerTool(
+    'm365_validate_connection',
+    {
+        title: 'Validate a specific connection',
+        description: 'Checks if a connection is valid and working. Verifies the appId matches the expected value if an alias with appId is configured.',
+        inputSchema: {
+            connectionNameOrAlias: z.string().describe('Connection ID or alias to validate')
+        }
+    },
+    async ({ connectionNameOrAlias }) => ({
+        content: [{ type: 'text', text: await util.validateConnection(connectionNameOrAlias) }]
+    })
+);
+
+server.registerTool(
+    'm365_validate_all_connections',
+    {
+        title: 'Validate all connections',
+        description: 'Checks all connections for validity. Identifies broken connections and appId mismatches. Use this to find connections that need to be removed or re-authenticated.',
+        inputSchema: {}
+    },
+    async ({}) => ({
+        content: [{ type: 'text', text: await util.validateAllConnections() }]
     })
 );
 

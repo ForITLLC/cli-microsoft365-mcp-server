@@ -1,10 +1,230 @@
 import { exec, spawn } from 'child_process';
 import path from 'path';
 import { promises as fs } from 'fs';
+import os from 'os';
 
 // BLOCKED/HIDDEN COMMANDS - prevent accidental logout
 const BLOCKED_COMMANDS = ['logout', 'connection remove'];
 const HIDDEN_COMMANDS = ['logout', 'connection remove'];
+
+// Alias storage file
+const ALIASES_FILE = path.join(os.homedir(), '.m365-connection-aliases.json');
+
+// Alias type: { alias: string, connectionId: string, tenant: string, appId?: string }
+interface ConnectionAlias {
+    alias: string;
+    connectionId: string;
+    tenant: string;
+    appId?: string;
+}
+
+async function loadAliases(): Promise<ConnectionAlias[]> {
+    try {
+        const content = await fs.readFile(ALIASES_FILE, 'utf-8');
+        return JSON.parse(content);
+    } catch {
+        return [];
+    }
+}
+
+async function saveAliases(aliases: ConnectionAlias[]): Promise<void> {
+    await fs.writeFile(ALIASES_FILE, JSON.stringify(aliases, null, 2));
+}
+
+export async function setConnectionAlias(alias: string, connectionId: string, tenant: string, appId?: string): Promise<string> {
+    const aliases = await loadAliases();
+    const existing = aliases.findIndex(a => a.alias === alias);
+
+    const newAlias: ConnectionAlias = { alias, connectionId, tenant, appId };
+
+    if (existing >= 0) {
+        aliases[existing] = newAlias;
+    } else {
+        aliases.push(newAlias);
+    }
+
+    await saveAliases(aliases);
+    return `Alias '${alias}' set for connection '${connectionId}' (tenant: ${tenant}${appId ? `, appId: ${appId}` : ''})`;
+}
+
+export async function removeConnectionAlias(alias: string): Promise<string> {
+    const aliases = await loadAliases();
+    const filtered = aliases.filter(a => a.alias !== alias);
+
+    if (filtered.length === aliases.length) {
+        return `Alias '${alias}' not found`;
+    }
+
+    await saveAliases(filtered);
+    return `Alias '${alias}' removed`;
+}
+
+export async function resolveConnectionName(nameOrAlias: string): Promise<string> {
+    const aliases = await loadAliases();
+    const found = aliases.find(a => a.alias === nameOrAlias);
+    return found ? found.connectionId : nameOrAlias;
+}
+
+export async function getConnectionStatus(connectionId: string): Promise<any> {
+    try {
+        // Switch to connection and get status
+        const result = await runCliCommandRaw(`m365 connection use --name "${connectionId}" && m365 status`);
+        return JSON.parse(result);
+    } catch (error) {
+        return { error: String(error), connectionId };
+    }
+}
+
+export async function validateConnection(connectionNameOrAlias: string): Promise<string> {
+    const aliases = await loadAliases();
+    const alias = aliases.find(a => a.alias === connectionNameOrAlias);
+    const connectionId = alias ? alias.connectionId : connectionNameOrAlias;
+
+    try {
+        const status = await getConnectionStatus(connectionId);
+
+        if (status.error) {
+            return JSON.stringify({
+                valid: false,
+                connectionId,
+                alias: alias?.alias || null,
+                error: status.error
+            }, null, 2);
+        }
+
+        // Check if appId matches alias expectation
+        const appIdMatch = !alias?.appId || alias.appId === status.appId;
+
+        return JSON.stringify({
+            valid: true,
+            connectionId,
+            alias: alias?.alias || null,
+            connectedAs: status.connectedAs,
+            appId: status.appId,
+            appTenant: status.appTenant,
+            expectedAppId: alias?.appId || null,
+            appIdMatch
+        }, null, 2);
+    } catch (error) {
+        return JSON.stringify({
+            valid: false,
+            connectionId,
+            alias: alias?.alias || null,
+            error: String(error)
+        }, null, 2);
+    }
+}
+
+export async function validateAllConnections(): Promise<string> {
+    const [connectionsResult, aliases] = await Promise.all([
+        runCliCommandRaw('m365 connection list'),
+        loadAliases()
+    ]);
+
+    try {
+        const connections = JSON.parse(connectionsResult);
+        const results = [];
+
+        for (const conn of connections) {
+            const alias = aliases.find(a => a.connectionId === conn.name);
+
+            try {
+                const status = await getConnectionStatus(conn.name);
+
+                if (status.error) {
+                    results.push({
+                        connectionId: conn.name,
+                        alias: alias?.alias || null,
+                        valid: false,
+                        error: status.error
+                    });
+                } else {
+                    const appIdMatch = !alias?.appId || alias.appId === status.appId;
+                    results.push({
+                        connectionId: conn.name,
+                        alias: alias?.alias || null,
+                        valid: true,
+                        connectedAs: status.connectedAs,
+                        appId: status.appId,
+                        expectedAppId: alias?.appId || null,
+                        appIdMatch
+                    });
+                }
+            } catch (error) {
+                results.push({
+                    connectionId: conn.name,
+                    alias: alias?.alias || null,
+                    valid: false,
+                    error: String(error)
+                });
+            }
+        }
+
+        return JSON.stringify(results, null, 2);
+    } catch (error) {
+        return `Failed to validate connections: ${error}`;
+    }
+}
+
+export async function listConnectionsWithAliases(): Promise<string> {
+    const [connectionsResult, aliases] = await Promise.all([
+        runCliCommandRaw('m365 connection list'),
+        loadAliases()
+    ]);
+
+    try {
+        const connections = JSON.parse(connectionsResult);
+        const enriched = connections.map((conn: any) => {
+            const alias = aliases.find(a => a.connectionId === conn.name);
+            return {
+                ...conn,
+                alias: alias?.alias || null,
+                appId: alias?.appId || null
+            };
+        });
+        return JSON.stringify(enriched, null, 2);
+    } catch {
+        return connectionsResult;
+    }
+}
+
+// Raw command execution without alias resolution (for internal use)
+async function runCliCommandRaw(command: string): Promise<string> {
+    let fullCommand = command;
+    if (!fullCommand.includes('--output')) {
+        fullCommand += ' --output json';
+    }
+
+    return new Promise((resolve, reject) => {
+        const subprocess = spawn(fullCommand, {
+            shell: true,
+            timeout: 120000,
+        });
+
+        let output = '';
+        let error = '';
+
+        subprocess.stdout.on('data', (data) => {
+            output += data.toString();
+        });
+
+        subprocess.stderr.on('data', (data) => {
+            error += data.toString();
+        });
+
+        subprocess.on('close', (code) => {
+            if (code === 0) {
+                resolve(output.trim());
+            } else {
+                reject(new Error(error.trim() || `Command failed with exit code ${code}`));
+            }
+        });
+
+        subprocess.on('error', (err) => {
+            reject(err);
+        });
+    });
+}
 
 export async function runCliCommand(command: string, connectionName?: string): Promise<string> {
     // Check for blocked commands
@@ -15,10 +235,26 @@ export async function runCliCommand(command: string, connectionName?: string): P
         }
     }
 
-    // If connectionName specified, prepend connection switch
+    // If connectionName specified, resolve alias and validate appId
     let fullCommand = command;
     if (connectionName) {
-        fullCommand = `m365 connection use --name "${connectionName}" && ${command}`;
+        const aliases = await loadAliases();
+        const alias = aliases.find(a => a.alias === connectionName);
+        const resolvedConnection = alias ? alias.connectionId : connectionName;
+
+        // If alias has expected appId, validate before running
+        if (alias?.appId) {
+            try {
+                const status = await getConnectionStatus(resolvedConnection);
+                if (!status.error && status.appId !== alias.appId) {
+                    return `ERROR: AppId mismatch for '${connectionName}'. Expected: ${alias.appId}, Got: ${status.appId}. Re-authenticate with correct app or update alias.`;
+                }
+            } catch {
+                // Continue anyway if validation fails - command will fail naturally
+            }
+        }
+
+        fullCommand = `m365 connection use --name "${resolvedConnection}" && ${command}`;
     }
 
     if (!fullCommand.includes('--output')) {
