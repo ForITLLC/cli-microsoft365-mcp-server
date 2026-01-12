@@ -53,11 +53,11 @@ server.registerTool(
     'm365_run_command',
     {
         title: 'Execute CLI for Microsoft 365 command',
-        description: 'Runs a specified CLI for Microsoft 365 command to be used by the Model Context Protocol to execute the command and return the result and reason over the response. Can target specific tenant connection without manual switching.',
+        description: 'Runs a specified CLI for Microsoft 365 command. REQUIRES connectionName when multiple connections exist.',
         inputSchema:
         {
             command: z.string().describe('command name which should be executed'),
-            connectionName: z.string().optional().describe('Target a specific connection by name (from m365_list_connections) without switching. Omit to use active connection.')
+            connectionName: z.string().optional().describe('REQUIRED when multiple connections exist. Use connection name or alias from m365_list_connections.')
         }
     },
     async ({ command, connectionName }) => ({

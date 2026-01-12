@@ -67,8 +67,8 @@ export async function resolveConnectionName(nameOrAlias: string): Promise<string
 
 export async function getConnectionStatus(connectionId: string): Promise<any> {
     try {
-        // Switch to connection and get status
-        const result = await runCliCommandRaw(`m365 connection use --name "${connectionId}" && m365 status`);
+        // Get status for specific connection WITHOUT switching
+        const result = await runCliCommandRaw(`m365 status --connection "${connectionId}"`);
         return JSON.parse(result);
     } catch (error) {
         return { error: String(error), connectionId };
@@ -326,26 +326,18 @@ export async function runCliCommand(command: string, connectionName?: string): P
         }
     }
 
-    // If connectionName specified, resolve alias and validate appId
+    // If connectionName specified, resolve alias and add --connection flag (NO SWITCHING)
     let fullCommand = command;
     if (connectionName) {
         const aliases = await loadAliases();
         const alias = aliases.find(a => a.alias === connectionName);
         const resolvedConnection = alias ? alias.connectionId : connectionName;
 
-        // If alias has expected appId, validate before running
-        if (alias?.appId) {
-            try {
-                const status = await getConnectionStatus(resolvedConnection);
-                if (!status.error && status.appId !== alias.appId) {
-                    return `ERROR: AppId mismatch for '${connectionName}'. Expected: ${alias.appId}, Got: ${status.appId}. Re-authenticate with correct app or update alias.`;
-                }
-            } catch {
-                // Continue anyway if validation fails - command will fail naturally
-            }
+        // Add --connection flag to target specific connection WITHOUT switching
+        // This uses the connection directly without any "connection use" nonsense
+        if (!fullCommand.includes('--connection')) {
+            fullCommand = `${command} --connection "${resolvedConnection}"`;
         }
-
-        fullCommand = `m365 connection use --name "${resolvedConnection}" && ${command}`;
     }
 
     if (!fullCommand.includes('--output')) {
