@@ -67,8 +67,8 @@ export async function resolveConnectionName(nameOrAlias: string): Promise<string
 
 export async function getConnectionStatus(connectionId: string): Promise<any> {
     try {
-        // Get status for specific connection WITHOUT switching
-        const result = await runCliCommandRaw(`m365 status --connection "${connectionId}"`);
+        // m365 CLI requires connection use to get status of specific connection
+        const result = await runCliCommandRaw(`m365 connection use --name "${connectionId}" && m365 status`);
         return JSON.parse(result);
     } catch (error) {
         return { error: String(error), connectionId };
@@ -326,18 +326,16 @@ export async function runCliCommand(command: string, connectionName?: string): P
         }
     }
 
-    // If connectionName specified, resolve alias and add --connection flag (NO SWITCHING)
+    // If connectionName specified, resolve alias and use that connection
     let fullCommand = command;
     if (connectionName) {
         const aliases = await loadAliases();
         const alias = aliases.find(a => a.alias === connectionName);
         const resolvedConnection = alias ? alias.connectionId : connectionName;
 
-        // Add --connection flag to target specific connection WITHOUT switching
-        // This uses the connection directly without any "connection use" nonsense
-        if (!fullCommand.includes('--connection')) {
-            fullCommand = `${command} --connection "${resolvedConnection}"`;
-        }
+        // m365 CLI requires "connection use" to target a specific connection
+        // There is no --connection flag on individual commands
+        fullCommand = `m365 connection use --name "${resolvedConnection}" && ${command}`;
     }
 
     if (!fullCommand.includes('--output')) {
