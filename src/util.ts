@@ -67,9 +67,14 @@ export async function resolveConnectionName(nameOrAlias: string): Promise<string
 
 export async function getConnectionStatus(connectionId: string): Promise<any> {
     try {
-        // m365 CLI requires connection use to get status of specific connection
-        const result = await runCliCommandRaw(`m365 connection use --name "${connectionId}" && m365 status`);
-        return JSON.parse(result);
+        // Get status from connection list - NO SWITCHING
+        const result = await runCliCommandRaw('m365 connection list');
+        const connections = JSON.parse(result);
+        const conn = connections.find((c: any) => c.name === connectionId);
+        if (conn) {
+            return { connectionId, connectedAs: conn.connectedAs, appId: conn.appId, appTenant: conn.appTenant };
+        }
+        return { error: `Connection ${connectionId} not found`, connectionId };
     } catch (error) {
         return { error: String(error), connectionId };
     }
@@ -326,16 +331,25 @@ export async function runCliCommand(command: string, connectionName?: string): P
         }
     }
 
-    // If connectionName specified, resolve alias and use that connection
+    // Auto-switch to requested connection if needed
     let fullCommand = command;
     if (connectionName) {
         const aliases = await loadAliases();
         const alias = aliases.find(a => a.alias === connectionName);
         const resolvedConnection = alias ? alias.connectionId : connectionName;
 
-        // m365 CLI requires "connection use" to target a specific connection
-        // There is no --connection flag on individual commands
-        fullCommand = `m365 connection use --name "${resolvedConnection}" && ${command}`;
+        // Switch to requested connection if not already active
+        try {
+            const connectionsRaw = await runCliCommandRaw('m365 connection list');
+            const connections = JSON.parse(connectionsRaw);
+            const activeConn = connections.find((c: any) => c.active === true);
+            if (activeConn && activeConn.name !== resolvedConnection) {
+                // Auto-switch instead of erroring
+                await runCliCommandRaw(`m365 connection use --name "${resolvedConnection}"`);
+            }
+        } catch {
+            // If we can't switch, continue - command will fail naturally if needed
+        }
     }
 
     if (!fullCommand.includes('--output')) {
