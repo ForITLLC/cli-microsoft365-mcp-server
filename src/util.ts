@@ -3,226 +3,237 @@ import path from 'path';
 import { promises as fs } from 'fs';
 import os from 'os';
 
-// BLOCKED/HIDDEN COMMANDS - prevent accidental logout
-const BLOCKED_COMMANDS = ['logout', 'connection remove'];
+// BLOCKED/HIDDEN COMMANDS - prevent accidental logout/removal
+const BLOCKED_COMMANDS = ['logout', 'connection remove', 'connection use'];
 const HIDDEN_COMMANDS = ['logout', 'connection remove'];
 
-// Alias storage file
-const ALIASES_FILE = path.join(os.homedir(), '.m365-connection-aliases.json');
+// Universal connection registry - shared across all M365 MCPs
+const CONNECTIONS_FILE = path.join(os.homedir(), '.m365-connections.json');
 
-// Alias type: { alias: string, connectionId: string, tenant: string, appId?: string }
-interface ConnectionAlias {
-    alias: string;
-    connectionId: string;
+// m365 CLI stores connections here (we READ from this, never write)
+const CLI_CONNECTIONS_FILE = path.join(os.homedir(), '.cli-m365-all-connections.json');
+
+const MCP_NAME = 'pnp-m365';
+
+// Registry connection entry
+interface ConnectionEntry {
+    appId: string | null;
     tenant: string;
-    appId?: string;
+    description: string;
+    mcps: string[];
+    cliConnectionName: string | null;
 }
 
-async function loadAliases(): Promise<ConnectionAlias[]> {
+interface ConnectionsRegistry {
+    connections: Record<string, ConnectionEntry>;
+    _schema?: any;
+}
+
+// CLI connection from ~/.cli-m365-all-connections.json
+interface CliConnection {
+    name: string;
+    identityName: string;
+    identityId: string;
+    identityTenantId: string;
+    tenant: string;
+    appId: string;
+    authType: string;
+    active?: boolean;
+    accessTokens?: Record<string, any>;
+}
+
+async function loadRegistry(): Promise<ConnectionsRegistry> {
     try {
-        const content = await fs.readFile(ALIASES_FILE, 'utf-8');
+        const content = await fs.readFile(CONNECTIONS_FILE, 'utf-8');
+        return JSON.parse(content);
+    } catch {
+        return { connections: {} };
+    }
+}
+
+async function saveRegistry(registry: ConnectionsRegistry): Promise<void> {
+    await fs.writeFile(CONNECTIONS_FILE, JSON.stringify(registry, null, 2));
+}
+
+async function loadCliConnections(): Promise<CliConnection[]> {
+    try {
+        const content = await fs.readFile(CLI_CONNECTIONS_FILE, 'utf-8');
         return JSON.parse(content);
     } catch {
         return [];
     }
 }
 
-async function saveAliases(aliases: ConnectionAlias[]): Promise<void> {
-    await fs.writeFile(ALIASES_FILE, JSON.stringify(aliases, null, 2));
-}
-
-export async function setConnectionAlias(alias: string, connectionId: string, tenant: string, appId?: string): Promise<string> {
-    const aliases = await loadAliases();
-    const existing = aliases.findIndex(a => a.alias === alias);
-
-    const newAlias: ConnectionAlias = { alias, connectionId, tenant, appId };
-
-    if (existing >= 0) {
-        aliases[existing] = newAlias;
-    } else {
-        aliases.push(newAlias);
+// Find CLI connection that matches a registry entry
+function findCliConnection(entry: ConnectionEntry, cliConnections: CliConnection[]): CliConnection | null {
+    // First try by cliConnectionName if set
+    if (entry.cliConnectionName) {
+        const match = cliConnections.find(c => c.name === entry.cliConnectionName);
+        if (match) return match;
     }
 
-    await saveAliases(aliases);
-    return `Alias '${alias}' set for connection '${connectionId}' (tenant: ${tenant}${appId ? `, appId: ${appId}` : ''})`;
-}
+    // Match by appId AND (tenant domain OR identityName domain)
+    // CLI stores tenant as "common" for multi-tenant apps, so we check identityName domain
+    return cliConnections.find(c => {
+        if (c.appId !== entry.appId) return false;
 
-export async function removeConnectionAlias(alias: string): Promise<string> {
-    const aliases = await loadAliases();
-    const filtered = aliases.filter(a => a.alias !== alias);
+        // Direct tenant match
+        if (c.tenant === entry.tenant) return true;
 
-    if (filtered.length === aliases.length) {
-        return `Alias '${alias}' not found`;
-    }
-
-    await saveAliases(filtered);
-    return `Alias '${alias}' removed`;
-}
-
-export async function resolveConnectionName(nameOrAlias: string): Promise<string> {
-    const aliases = await loadAliases();
-    const found = aliases.find(a => a.alias === nameOrAlias);
-    return found ? found.connectionId : nameOrAlias;
-}
-
-export async function getConnectionStatus(connectionId: string): Promise<any> {
-    try {
-        // Get status from connection list - NO SWITCHING
-        const result = await runCliCommandRaw('m365 connection list');
-        const connections = JSON.parse(result);
-        const conn = connections.find((c: any) => c.name === connectionId);
-        if (conn) {
-            return { connectionId, connectedAs: conn.connectedAs, appId: conn.appId, appTenant: conn.appTenant };
-        }
-        return { error: `Connection ${connectionId} not found`, connectionId };
-    } catch (error) {
-        return { error: String(error), connectionId };
-    }
-}
-
-export async function validateConnection(connectionNameOrAlias: string): Promise<string> {
-    const aliases = await loadAliases();
-    const alias = aliases.find(a => a.alias === connectionNameOrAlias);
-    const connectionId = alias ? alias.connectionId : connectionNameOrAlias;
-
-    try {
-        const status = await getConnectionStatus(connectionId);
-
-        if (status.error) {
-            return JSON.stringify({
-                valid: false,
-                connectionId,
-                alias: alias?.alias || null,
-                error: status.error
-            }, null, 2);
+        // Multi-tenant app: check if identityName domain matches registry tenant
+        // e.g., identityName "B.Thomas@forit.io" should match tenant "forit.io"
+        if (c.identityName && entry.tenant) {
+            const identityDomain = c.identityName.split('@')[1]?.toLowerCase();
+            const registryTenant = entry.tenant.toLowerCase();
+            if (identityDomain === registryTenant) return true;
         }
 
-        // Check if appId matches alias expectation
-        const appIdMatch = !alias?.appId || alias.appId === status.appId;
+        return false;
+    }) || null;
+}
 
+// List all connections with their status
+export async function listConnections(): Promise<string> {
+    const registry = await loadRegistry();
+    const cliConnections = await loadCliConnections();
+
+    const entries = Object.entries(registry.connections)
+        .filter(([_, entry]) => entry.mcps.includes(MCP_NAME));
+
+    if (entries.length === 0) {
         return JSON.stringify({
-            valid: true,
-            connectionId,
-            alias: alias?.alias || null,
-            connectedAs: status.connectedAs,
-            appId: status.appId,
-            appTenant: status.appTenant,
-            expectedAppId: alias?.appId || null,
-            appIdMatch
+            error: 'No connections configured for pnp-m365',
+            hint: 'Add connections to ~/.m365-connections.json with "pnp-m365" in mcps array'
         }, null, 2);
-    } catch (error) {
+    }
+
+    const results = entries.map(([name, entry]) => {
+        const cliConn = findCliConnection(entry, cliConnections);
+        return {
+            name,
+            tenant: entry.tenant,
+            appId: entry.appId,
+            description: entry.description,
+            loggedIn: !!cliConn,
+            connectedAs: cliConn?.identityName || null,
+            cliConnectionName: cliConn?.name || null,
+            needsSetup: !entry.appId ? 'Missing appId - needs app consent in tenant' : null
+        };
+    });
+
+    return JSON.stringify(results, null, 2);
+}
+
+// Validate a specific connection
+export async function validateConnection(connectionName: string): Promise<string> {
+    const registry = await loadRegistry();
+    const entry = registry.connections[connectionName];
+
+    if (!entry) {
+        const available = Object.keys(registry.connections).filter(
+            k => registry.connections[k].mcps.includes(MCP_NAME)
+        );
         return JSON.stringify({
             valid: false,
-            connectionId,
-            alias: alias?.alias || null,
-            error: String(error)
+            error: `Connection "${connectionName}" not found`,
+            available
         }, null, 2);
     }
+
+    if (!entry.mcps.includes(MCP_NAME)) {
+        return JSON.stringify({
+            valid: false,
+            error: `Connection "${connectionName}" not configured for pnp-m365`,
+            configuredFor: entry.mcps
+        }, null, 2);
+    }
+
+    if (!entry.appId) {
+        return JSON.stringify({
+            valid: false,
+            error: `Connection "${connectionName}" has no appId configured`,
+            hint: 'Add appId to ~/.m365-connections.json or get admin consent in tenant'
+        }, null, 2);
+    }
+
+    const cliConnections = await loadCliConnections();
+    const cliConn = findCliConnection(entry, cliConnections);
+
+    if (!cliConn) {
+        return JSON.stringify({
+            valid: false,
+            name: connectionName,
+            tenant: entry.tenant,
+            appId: entry.appId,
+            error: 'Not logged in - run m365_login'
+        }, null, 2);
+    }
+
+    return JSON.stringify({
+        valid: true,
+        name: connectionName,
+        tenant: entry.tenant,
+        appId: entry.appId,
+        connectedAs: cliConn.identityName,
+        cliConnectionName: cliConn.name
+    }, null, 2);
 }
 
-export async function validateAllConnections(): Promise<string> {
-    const [connectionsResult, aliases] = await Promise.all([
-        runCliCommandRaw('m365 connection list'),
-        loadAliases()
-    ]);
+// Login with device code - uses native CLI, no isolation nonsense
+export async function loginWithDeviceCode(connectionName: string): Promise<string> {
+    const registry = await loadRegistry();
+    const entry = registry.connections[connectionName];
 
-    try {
-        const connections = JSON.parse(connectionsResult);
-        const results = [];
-
-        for (const conn of connections) {
-            const alias = aliases.find(a => a.connectionId === conn.name);
-
-            try {
-                const status = await getConnectionStatus(conn.name);
-
-                if (status.error) {
-                    results.push({
-                        connectionId: conn.name,
-                        alias: alias?.alias || null,
-                        valid: false,
-                        error: status.error
-                    });
-                } else {
-                    const appIdMatch = !alias?.appId || alias.appId === status.appId;
-                    results.push({
-                        connectionId: conn.name,
-                        alias: alias?.alias || null,
-                        valid: true,
-                        connectedAs: status.connectedAs,
-                        appId: status.appId,
-                        expectedAppId: alias?.appId || null,
-                        appIdMatch
-                    });
-                }
-            } catch (error) {
-                results.push({
-                    connectionId: conn.name,
-                    alias: alias?.alias || null,
-                    valid: false,
-                    error: String(error)
-                });
-            }
-        }
-
-        return JSON.stringify(results, null, 2);
-    } catch (error) {
-        return `Failed to validate connections: ${error}`;
+    if (!entry) {
+        const available = Object.keys(registry.connections).filter(
+            k => registry.connections[k].mcps.includes(MCP_NAME)
+        );
+        return JSON.stringify({
+            error: `Connection "${connectionName}" not found in registry`,
+            available,
+            hint: 'Add connection to ~/.m365-connections.json first'
+        }, null, 2);
     }
-}
 
-export async function listConnectionsWithAliases(): Promise<string> {
-    const [connectionsResult, aliases] = await Promise.all([
-        runCliCommandRaw('m365 connection list'),
-        loadAliases()
-    ]);
-
-    try {
-        const connections = JSON.parse(connectionsResult);
-        const enriched = connections.map((conn: any) => {
-            const alias = aliases.find(a => a.connectionId === conn.name);
-            // Remove 'active' field - doesn't make sense when connectionName is always required
-            const { active, ...rest } = conn;
-            return {
-                ...rest,
-                alias: alias?.alias || null,
-                appId: alias?.appId || null
-            };
-        });
-        return JSON.stringify(enriched, null, 2);
-    } catch {
-        return connectionsResult;
+    if (!entry.appId) {
+        return JSON.stringify({
+            error: `Connection "${connectionName}" has no appId configured`,
+            tenant: entry.tenant,
+            hint: 'You need an app registration consented in this tenant. Add appId to ~/.m365-connections.json'
+        }, null, 2);
     }
-}
 
-// Login with device code flow - returns device code IMMEDIATELY for user visibility
-export async function loginWithDeviceCode(alias: string, tenant: string, appId?: string): Promise<string> {
-    const useAppId = appId || '31359c7f-bd7e-475c-86db-fdb8c937548e';
-    let loginCmd = `m365 login --authType deviceCode --appId ${useAppId}`;
-    if (tenant) {
-        loginCmd += ` --tenant ${tenant}`;
-    }
+    // Build login command - NO M365_CLI_CONFIG_HOME, use native storage
+    const loginCmd = `m365 login --authType deviceCode --appId ${entry.appId} --tenant ${entry.tenant}`;
 
     return new Promise((resolve) => {
         const subprocess = spawn(loginCmd, {
             shell: true,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            detached: true,
+            stdio: ['pipe', 'pipe', 'pipe']
         });
 
-        let resolved = false;
+        let output = '';
+        let deviceCode = '';
 
-        const handleOutput = (data: Buffer) => {
-            const chunk = data.toString();
-            const codeMatch = chunk.match(/enter the code ([A-Z0-9]+) to authenticate/i);
-            if (codeMatch && !resolved) {
-                resolved = true;
-                const deviceCode = codeMatch[1];
-                // Detach subprocess and close streams so it doesn't block MCP response
-                subprocess.stdout?.destroy();
-                subprocess.stderr?.destroy();
-                subprocess.unref();
-                // Return IMMEDIATELY with super clear formatting
+        subprocess.stdout.on('data', (data) => {
+            output += data.toString();
+            const match = output.match(/enter the code ([A-Z0-9]+) to authenticate/i);
+            if (match && !deviceCode) {
+                deviceCode = match[1];
+            }
+        });
+
+        subprocess.stderr.on('data', (data) => {
+            output += data.toString();
+            const match = output.match(/enter the code ([A-Z0-9]+) to authenticate/i);
+            if (match && !deviceCode) {
+                deviceCode = match[1];
+            }
+        });
+
+        // After 3 seconds, return the device code if we have it
+        setTimeout(async () => {
+            if (deviceCode) {
                 resolve(`
 ████████████████████████████████████████████████████████████
 ██                                                        ██
@@ -232,244 +243,150 @@ export async function loginWithDeviceCode(alias: string, tenant: string, appId?:
 ██                                                        ██
 ████████████████████████████████████████████████████████████
 
-Enter the code above, then come back here.
-Alias "${alias}" will be created after successful login.
+Connection: ${connectionName}
+Tenant: ${entry.tenant}
+App ID: ${entry.appId}
+Description: ${entry.description}
+
+Complete auth in browser. The CLI will store the token automatically.
+Run m365_list_connections to verify after authenticating.
 `);
-            }
-        };
-
-        subprocess.stdout.on('data', handleOutput);
-        subprocess.stderr.on('data', handleOutput);
-
-        subprocess.on('close', async (code) => {
-            if (resolved) return; // Already returned device code
-            if (code === 0) {
-                try {
-                    const status = await runCliCommandRaw('m365 status');
-                    const statusJson = JSON.parse(status);
-                    await setConnectionAlias(alias, statusJson.connectionName, tenant, statusJson.appId);
-                    resolve(`Login successful! Alias "${alias}" created for ${statusJson.connectedAs}`);
-                } catch {
-                    resolve('Login succeeded but failed to create alias');
-                }
             } else {
-                resolve('Login failed - no device code received');
+                resolve(JSON.stringify({
+                    error: 'Failed to get device code',
+                    output: output.substring(0, 500)
+                }, null, 2));
             }
-        });
-
-        subprocess.on('error', (err) => {
-            resolve(JSON.stringify({
-                success: false,
-                error: err.message
-            }, null, 2));
-        });
+        }, 3000);
     });
 }
 
-// Raw command execution without alias resolution (for internal use)
-async function runCliCommandRaw(command: string): Promise<string> {
+// Run CLI command - ALWAYS requires connectionName, no defaults ever
+export async function runCliCommand(command: string, connectionName: string): Promise<string> {
+    // Validate connectionName is provided
+    if (!connectionName) {
+        const registry = await loadRegistry();
+        const available = Object.keys(registry.connections).filter(
+            k => registry.connections[k].mcps.includes(MCP_NAME)
+        );
+        return JSON.stringify({
+            error: 'connectionName is REQUIRED - no defaults',
+            available,
+            hint: 'Every command must specify which connection to use'
+        }, null, 2);
+    }
+
+    // Check for blocked commands
+    const lowerCommand = command.toLowerCase();
+    for (const blocked of BLOCKED_COMMANDS) {
+        if (lowerCommand.includes(blocked)) {
+            return `ERROR: '${blocked}' is blocked. Use CLI directly if needed.`;
+        }
+    }
+
+    // Load registry and find connection
+    const registry = await loadRegistry();
+    const entry = registry.connections[connectionName];
+
+    if (!entry) {
+        const available = Object.keys(registry.connections).filter(
+            k => registry.connections[k].mcps.includes(MCP_NAME)
+        );
+        return JSON.stringify({
+            error: `Connection "${connectionName}" not found`,
+            available
+        }, null, 2);
+    }
+
+    if (!entry.mcps.includes(MCP_NAME)) {
+        return JSON.stringify({
+            error: `Connection "${connectionName}" not configured for pnp-m365`,
+            configuredFor: entry.mcps
+        }, null, 2);
+    }
+
+    // Find the CLI connection
+    const cliConnections = await loadCliConnections();
+    const cliConn = findCliConnection(entry, cliConnections);
+
+    if (!cliConn) {
+        return JSON.stringify({
+            error: `Connection "${connectionName}" not logged in`,
+            hint: `Run m365_login with connectionName="${connectionName}"`
+        }, null, 2);
+    }
+
     let fullCommand = command;
     if (!fullCommand.includes('--output')) {
         fullCommand += ' --output json';
     }
 
+    // Check if this connection is already active - if so, skip connection use
+    // connection use outputs extra help text even on success
+    let wrappedCommand = fullCommand;
+    if (!cliConn.active) {
+        // Only switch connections if needed
+        wrappedCommand = `m365 connection use "${cliConn.name}" > /dev/null 2>&1 && ${fullCommand}`;
+    }
+
     return new Promise((resolve, reject) => {
-        const subprocess = spawn(fullCommand, {
-            shell: true,
-            timeout: 120000,
-        });
-
-        let output = '';
-        let error = '';
-
-        subprocess.stdout.on('data', (data) => {
-            output += data.toString();
-        });
-
-        subprocess.stderr.on('data', (data) => {
-            error += data.toString();
-        });
-
-        subprocess.on('close', (code) => {
-            if (code === 0) {
-                resolve(output.trim());
-            } else {
-                reject(new Error(error.trim() || `Command failed with exit code ${code}`));
+        exec(wrappedCommand, { timeout: 120000 }, (error, stdout, stderr) => {
+            if (error) {
+                resolve(`ERROR: ${stderr || error.message}`);
+                return;
             }
-        });
-
-        subprocess.on('error', (err) => {
-            reject(err);
+            resolve(stdout.trim());
         });
     });
 }
 
-export async function runCliCommand(command: string, connectionName?: string): Promise<string> {
-    // Check for blocked commands
-    const lowerCommand = command.toLowerCase();
-    for (const blocked of BLOCKED_COMMANDS) {
-        if (lowerCommand.includes(blocked)) {
-            return `ERROR: '${blocked}' command is disabled to prevent accidental logout. Use the CLI directly if you really need this.`;
-        }
-    }
-
-    // REQUIRE connectionName when multiple connections exist
-    if (!connectionName) {
-        try {
-            const connectionsRaw = await runCliCommandRaw('m365 connection list');
-            const connections = JSON.parse(connectionsRaw);
-            if (connections.length > 1) {
-                const aliases = await loadAliases();
-                const available = connections.map((c: any) => {
-                    const alias = aliases.find(a => a.connectionId === c.name);
-                    return alias ? `"${alias.alias}"` : c.name;
-                }).join(', ');
-                return `ERROR: Multiple connections exist. You MUST specify connectionName. Available: ${available}`;
-            }
-        } catch {
-            // If we can't check, continue - command will fail naturally if needed
-        }
-    }
-
-    // Auto-switch to requested connection if needed
-    let fullCommand = command;
-    if (connectionName) {
-        const aliases = await loadAliases();
-        const alias = aliases.find(a => a.alias === connectionName);
-        const resolvedConnection = alias ? alias.connectionId : connectionName;
-
-        // Switch to requested connection if not already active
-        try {
-            const connectionsRaw = await runCliCommandRaw('m365 connection list');
-            const connections = JSON.parse(connectionsRaw);
-            const activeConn = connections.find((c: any) => c.active === true);
-            if (activeConn && activeConn.name !== resolvedConnection) {
-                // Auto-switch instead of erroring
-                await runCliCommandRaw(`m365 connection use --name "${resolvedConnection}"`);
-            }
-        } catch {
-            // If we can't switch, continue - command will fail naturally if needed
-        }
-    }
-
-    if (!fullCommand.includes('--output')) {
-        const commandPart = fullCommand.split('--')[0].trim();
-        fullCommand += commandPart.endsWith(' list') ? ' --output csv' : ' --output json';
-    }
-
-    return new Promise((resolve, reject) => {
-        const subprocess = spawn(fullCommand, {
-            shell: true,
-            timeout: 120000,
-        });
-
-        let output = '';
-        let error = '';
-
-        subprocess.stdout.on('data', (data) => {
-            output += data.toString();
-        });
-
-        subprocess.stderr.on('data', (data) => {
-            error += data.toString();
-        });
-
-        subprocess.on('close', (code) => {
-            if (code === 0) {
-                resolve(output.trim());
-            } else {
-                reject(new Error(error.trim() || `Command failed with exit code ${code}`));
-            }
-        });
-
-        subprocess.on('error', (err) => {
-            if (err.message.includes('timeout')) {
-                reject(new Error('Command timed out'));
-            } else {
-                reject(err);
-            }
-        });
-    });
-}
-
-export async function getCommandDocs(commandName: string, docs: string): Promise<any> {
+// Get command documentation
+export async function getCommandDocs(commandName: string, docs: string): Promise<string> {
     try {
         const filePath = await checkGlobalPackage('@pnp/cli-microsoft365', `docs${path.sep}docs${path.sep}cmd${path.sep}${docs}`);
         if (!filePath) {
-            throw new Error('@pnp/cli-microsoft365 npm package not found or command documentation file not found');
-        }
-
-        const fileExists = await CheckIfFileExists(filePath);
-        if (!fileExists) {
-            throw new Error(`Documentation file for command ${commandName} not found at ${filePath}`);
+            throw new Error('@pnp/cli-microsoft365 package not found');
         }
 
         const fileContent = await fs.readFile(filePath, 'utf-8');
         return fileContent;
     } catch (error) {
-        console.error('An error occurred:', error);
-        return `Failed to retrieve documentation for command ${commandName}: ${error}`;
+        return `Failed to get docs for ${commandName}: ${error}`;
     }
 }
 
+// Get all available commands
 export async function getAllCommands(): Promise<any[]> {
-    let commands: any[] = [];
     try {
         const filePath = await checkGlobalPackage('@pnp/cli-microsoft365', 'allCommandsFull.json');
-        if (!filePath)
-            throw new Error('@pnp/cli-microsoft365 npm package not found or allCommandsFull.json file not found');
+        if (!filePath) {
+            throw new Error('@pnp/cli-microsoft365 package not found');
+        }
 
         const fileContent = await fs.readFile(filePath, 'utf-8');
         const cliCommands = JSON.parse(fileContent);
-        commands = cliCommands
-            .filter((command: any) => !HIDDEN_COMMANDS.some(hidden => command.name.toLowerCase().includes(hidden)))
-            .map((command: any) => ({
-                name: `m365 ${command.name}`,
-                description: command.description,
-                docs: command.help
+
+        return cliCommands
+            .filter((cmd: any) => !HIDDEN_COMMANDS.some(h => cmd.name.toLowerCase().includes(h)))
+            .map((cmd: any) => ({
+                name: `m365 ${cmd.name}`,
+                description: cmd.description,
+                docs: cmd.help
             }));
     } catch (error) {
-        console.error('An error occurred:', error);
-        return [{
-            error: `Failed to retrieve commands: ${error}`
-        }];
-    }
-    return commands;
-}
-
-async function CheckIfFileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
+        return [{ error: `Failed to get commands: ${error}` }];
     }
 }
 
 async function checkGlobalPackage(packageName: string, filePath: string): Promise<string | null> {
     return new Promise((resolve) => {
-        exec('npm list -g --depth=0', (error, stdout, stderr) => {
-            if (error) {
-                console.error('Error checking global packages:', error);
+        exec('npm root -g', (err, npmRoot) => {
+            if (err) {
                 resolve(null);
                 return;
             }
-
-            if (stdout.includes(packageName)) {
-                exec('npm root -g', (err, npmRoot) => {
-                    if (err) {
-                        console.error('Error getting npm root:', err);
-                        resolve(null);
-                        return;
-                    }
-
-                    const fileFullPath = path.join(npmRoot.trim(), packageName, filePath);
-                    resolve(fileFullPath);
-                });
-            } else {
-                console.log(`Package ${packageName} not found in global packages`);
-                resolve(null);
-            }
+            const fullPath = path.join(npmRoot.trim(), packageName, filePath);
+            fs.access(fullPath).then(() => resolve(fullPath)).catch(() => resolve(null));
         });
     });
 }

@@ -4,150 +4,127 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as util from './util.js';
-
+import { logToolCall } from './logger.js';
 
 const server = new McpServer({
-    name: "microsoft-365-mcp-server",
-    version: "0.0.1",
+    name: "pnp-m365-mcp",
+    version: "2.0.0",
 });
 
+// List all commands available in CLI for M365
 server.registerTool(
     'm365_get_commands',
     {
-        title: 'Retrieve CLI for Microsoft 365 commands',
-        description: 'Gets all CLI for Microsoft 365 commands to be used by the Model Context Protocol to pick the right command for a given task',
+        title: 'List available M365 CLI commands',
+        description: 'Gets all CLI for Microsoft 365 commands. Use m365_get_command_docs for details on a specific command.',
         inputSchema: {}
     },
-    async ({ }) => {
+    async ({}) => {
         const commands = await util.getAllCommands();
         return {
             content: [
-                { type: 'text', text: "TIP: Before executing any of the command run the 'm365_get_command_docs' tool to retrieve more context about it" },
-                { type: 'text', text: "TIP: avoid setting the '--output' option when running commands. The optimal output format is automatically selected in 'm365_run_command' tool based on the command type." },
+                { type: 'text', text: "TIP: Run m365_get_command_docs for detailed usage before executing commands." },
                 { type: 'text', text: JSON.stringify(commands, null, 2) }
             ]
         };
     }
 );
 
+// Get documentation for a specific command
 server.registerTool(
     'm365_get_command_docs',
     {
-        title: 'Retrieve CLI for Microsoft 365 command docs',
-        description: 'Gets documentation for a specified CLI for Microsoft 365 command to be used by the Model Context Protocol to provide detailed information about the command along with examples, use cases, and option descriptions',
-        inputSchema:
-        {
-            commandName: z.string().describe('command name which for which documentation is requested'),
-            docs: z.string().describe('file path to command documentation')
+        title: 'Get command documentation',
+        description: 'Gets detailed documentation for a CLI for M365 command including examples and options.',
+        inputSchema: {
+            commandName: z.string().describe('Command name (e.g., "spo site list")'),
+            docs: z.string().describe('Documentation file path from m365_get_commands')
         }
     },
     async ({ commandName, docs }) => ({
-        content: [
-            { type: 'text', text: "TIP: avoid setting the '--output' option when running commands. The optimal output format is automatically selected in 'm365_run_command' tool based on the command type." },
-            { type: 'text', text: await util.getCommandDocs(commandName, docs) }
-        ]
+        content: [{ type: 'text', text: await util.getCommandDocs(commandName, docs) }]
     })
 );
 
-server.registerTool(
-    'm365_run_command',
-    {
-        title: 'Execute CLI for Microsoft 365 command',
-        description: 'Runs a specified CLI for Microsoft 365 command. REQUIRES connectionName when multiple connections exist.',
-        inputSchema:
-        {
-            command: z.string().describe('command name which should be executed'),
-            connectionName: z.string().optional().describe('REQUIRED when multiple connections exist. Use connection name or alias from m365_list_connections.')
-        }
-    },
-    async ({ command, connectionName }) => ({
-        content: [{ type: 'text', text: await util.runCliCommand(command, connectionName) }]
-    })
-);
-
+// List connections - shows what's configured and what's logged in
 server.registerTool(
     'm365_list_connections',
     {
-        title: 'List CLI for Microsoft 365 connections',
-        description: 'Lists all available tenant connections with their aliases. Use alias or connection name with m365_run_command connectionName parameter to target specific tenants.',
+        title: 'List M365 connections',
+        description: 'Lists all configured connections from ~/.m365-connections.json and their login status. Shows which are available for pnp-m365.',
         inputSchema: {}
     },
     async ({}) => ({
-        content: [{ type: 'text', text: await util.listConnectionsWithAliases() }]
+        content: [{ type: 'text', text: await util.listConnections() }]
     })
 );
 
-server.registerTool(
-    'm365_set_connection_alias',
-    {
-        title: 'Set friendly alias for a connection',
-        description: 'Creates a friendly name alias for a tenant connection. Use aliases instead of connection IDs for easier multi-tenant targeting.',
-        inputSchema: {
-            alias: z.string().describe('Friendly name for the connection (e.g., "ForIT", "ClientX")'),
-            connectionId: z.string().describe('The connection ID/name from m365_list_connections'),
-            tenant: z.string().describe('Tenant name or domain (e.g., "foritllc.onmicrosoft.com")'),
-            appId: z.string().optional().describe('Optional: Azure AD app registration ID used for this connection')
-        }
-    },
-    async ({ alias, connectionId, tenant, appId }) => ({
-        content: [{ type: 'text', text: await util.setConnectionAlias(alias, connectionId, tenant, appId) }]
-    })
-);
-
-server.registerTool(
-    'm365_remove_connection_alias',
-    {
-        title: 'Remove a connection alias',
-        description: 'Removes a friendly name alias for a tenant connection.',
-        inputSchema: {
-            alias: z.string().describe('The alias to remove')
-        }
-    },
-    async ({ alias }) => ({
-        content: [{ type: 'text', text: await util.removeConnectionAlias(alias) }]
-    })
-);
-
+// Validate a connection
 server.registerTool(
     'm365_validate_connection',
     {
-        title: 'Validate a specific connection',
-        description: 'Checks if a connection is valid and working. Verifies the appId matches the expected value if an alias with appId is configured.',
+        title: 'Validate a connection',
+        description: 'Checks if a specific connection is properly configured and logged in.',
         inputSchema: {
-            connectionNameOrAlias: z.string().describe('Connection ID or alias to validate')
+            connectionName: z.string().describe('Connection name from ~/.m365-connections.json (e.g., "ForIT", "Personal")')
         }
     },
-    async ({ connectionNameOrAlias }) => ({
-        content: [{ type: 'text', text: await util.validateConnection(connectionNameOrAlias) }]
+    async ({ connectionName }) => ({
+        content: [{ type: 'text', text: await util.validateConnection(connectionName) }]
     })
 );
 
-server.registerTool(
-    'm365_validate_all_connections',
-    {
-        title: 'Validate all connections',
-        description: 'Checks all connections for validity. Identifies broken connections and appId mismatches. Use this to find connections that need to be removed or re-authenticated.',
-        inputSchema: {}
-    },
-    async ({}) => ({
-        content: [{ type: 'text', text: await util.validateAllConnections() }]
-    })
-);
-
+// Login to a connection
 server.registerTool(
     'm365_login',
     {
-        title: 'Login to Microsoft 365',
-        description: 'Authenticates to M365 using device code flow (SSH-friendly). Clears token cache first to avoid invalid_grant errors. Auto-creates an alias after successful login. Returns a device code to enter at microsoft.com/devicelogin.',
+        title: 'Login to M365',
+        description: 'Authenticates to M365 using device code flow. Connection must be configured in ~/.m365-connections.json first.',
         inputSchema: {
-            alias: z.string().describe('Friendly name for this connection (e.g., "ForIT", "ClientX")'),
-            tenant: z.string().describe('Tenant ID or domain (e.g., "c0efa09e-4bda-4a9d-a177-4c77076b7f76" or "forit.io")'),
-            appId: z.string().optional().describe('Optional: Custom app registration ID. Defaults to PnP multi-tenant app.')
+            connectionName: z.string().describe('Connection name from ~/.m365-connections.json (e.g., "ForIT", "Personal")')
         }
     },
-    async ({ alias, tenant, appId }) => ({
-        content: [{ type: 'text', text: await util.loginWithDeviceCode(alias, tenant, appId) }]
-    })
+    async ({ connectionName }) => {
+        const start = Date.now();
+        let result: string | undefined;
+        let error: string | undefined;
+        try {
+            result = await util.loginWithDeviceCode(connectionName);
+            return { content: [{ type: 'text', text: result }] };
+        } catch (e: any) {
+            error = e.message || String(e);
+            throw e;
+        } finally {
+            logToolCall('pnp-m365', 'm365_login', { connectionName }, connectionName, result?.substring(0, 100), error, Date.now() - start);
+        }
+    }
+);
+
+// Run a command - REQUIRES connectionName, no defaults
+server.registerTool(
+    'm365_run_command',
+    {
+        title: 'Run M365 CLI command',
+        description: 'Executes a CLI for M365 command. connectionName is REQUIRED - there are no defaults.',
+        inputSchema: {
+            command: z.string().describe('The m365 command to run (e.g., "m365 spo site list")'),
+            connectionName: z.string().describe('REQUIRED: Connection name (e.g., "ForIT"). Use m365_list_connections to see available.')
+        }
+    },
+    async ({ command, connectionName }) => {
+        const start = Date.now();
+        let result: string | undefined;
+        let error: string | undefined;
+        try {
+            result = await util.runCliCommand(command, connectionName);
+            return { content: [{ type: 'text', text: result }] };
+        } catch (e: any) {
+            error = e.message || String(e);
+            throw e;
+        } finally {
+            logToolCall('pnp-m365', 'm365_run_command', { command, connectionName }, connectionName, result?.substring(0, 100), error, Date.now() - start);
+        }
+    }
 );
 
 const transport = new StdioServerTransport();
